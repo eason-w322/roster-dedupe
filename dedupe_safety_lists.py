@@ -4,12 +4,14 @@ BLCK UNICRN - Safety list dedupe + flag tool (Week 3, Job 2).
  
 Unions every Apollo CSV export in a folder, removes duplicate people
 (same person = same Apollo Contact Id, or same email if no id),
-KEEPS EVERY ORIGINAL COLUMN, and appends flag columns on the right.
-Prints the real unique count plus a verification breakdown.
+flags each, reports the real unique count.
  
-Flag rules are data-driven (tuned to the real Stage / Email Status
-values seen across the 13 safety lists). See the sets below - these
-are the judgment calls to defend.
+OUTPUT IS SLIM: only the useful identity/contact fields + the flags,
+so the master opens instantly in any spreadsheet. (The full 82-column
+export is still your complete record on disk; this is the readable view.)
+ 
+Flag rules are tuned to the real Stage / Email Status values across the
+13 safety lists. The sets at the top are the judgment calls to defend.
  
 Usage:  python3 dedupe_safety_lists.py  <folder_with_csvs>  [output_folder]
 """
@@ -19,29 +21,27 @@ from collections import defaultdict, Counter
 csv.field_size_limit(10_000_000)
  
 # ============================================================
-#  JUDGMENT CALLS - the definitions behind every flag.
-#  Values are matched case-insensitively and trimmed.
+#  JUDGMENT CALLS - definitions behind every flag (case-insensitive)
 # ============================================================
- 
-# Email statuses we consider GENUINELY BAD (unreachable by email).
 BAD_EMAIL_STATUSES = {
     "unavailable", "email no longer verified", "potentially invalid",
     "invalid", "do_not_mail", "abuse", "unknown",
 }
-# Emails that are plausible but NOT confirmed -> usable, but soft-flagged.
-UNCONFIRMED_EMAIL_STATUSES = {
+UNCONFIRMED_EMAIL_STATUSES = {        # plausible but not verified -> usable, soft-flagged
     "catch-all", "extrapolated", "user managed",
 }
-# Everything else (verified, valid, likely, new data available, ...) = good.
- 
-# Stages that mean a dead / off-limits deal (closed-lost).
-# NOTE: "Unresponsive" is deliberately NOT here - worked-but-quiet is still live.
-LOST_STAGES = {
+LOST_STAGES = {                       # "Unresponsive" deliberately NOT here (worked-but-quiet = still live)
     "do not contact", "not interested", "bad data", "do_not_mail", "abuse",
 }
  
 PHONE_COLS = ["Work Direct Phone","Home Phone","Mobile Phone",
               "Corporate Phone","Other Phone","Company Phone"]
+ 
+# Columns kept in the SLIM master (everything else from the original is dropped
+# from the OUTPUT only - the source files are untouched).
+KEEP_COLS = ["row_num","First Name","Last Name","Title","Company Name","Email","Email Status",
+             "Stage","Last Contacted","Corporate Phone","Mobile Phone",
+             "Apollo Contact Id","Lists"]
  
 # ---------- helpers ----------
 def norm_email(s): return (s or "").strip().lower()
@@ -54,16 +54,15 @@ def has_phone(row):
     return False
  
 def email_bad(row):
-    if not norm_email(row.get("Email","")):          return True   # no email at all
-    if is_true(row.get("Email Bounced","")):         return True   # hard bounce
+    if not norm_email(row.get("Email","")):  return True
+    if is_true(row.get("Email Bounced","")): return True
     return (row.get("Email Status") or "").strip().lower() in BAD_EMAIL_STATUSES
  
 def email_unconfirmed(row):
     return (row.get("Email Status") or "").strip().lower() in UNCONFIRMED_EMAIL_STATUSES
  
 def stage_is_lost(row):
-    s = (row.get("Stage") or "").strip().lower()
-    return s in LOST_STAGES
+    return (row.get("Stage") or "").strip().lower() in LOST_STAGES
  
 def flags_for(row):
     f = {
@@ -75,7 +74,7 @@ def flags_for(row):
       "flag_closed_lost_or_dnc": stage_is_lost(row) or is_true(row.get("Do Not Call","")),
       "flag_no_phone":           not has_phone(row),
       "flag_bad_email":          email_bad(row),
-      "flag_email_unconfirmed":  email_unconfirmed(row),   # usable, but not verified
+      "flag_email_unconfirmed":  email_unconfirmed(row),
     }
     f["flag_no_valid_contact"] = f["flag_bad_email"] and f["flag_no_phone"]
     return f
@@ -91,18 +90,12 @@ def main():
     if not files:
         print("No CSV files found in", folder); return
  
-    people = {}
-    key_sources = defaultdict(set)
-    all_cols = []; seen_cols = set(); total_in = 0
+    people = {}; key_sources = defaultdict(set); total_in = 0
  
     for path in files:
         fname = os.path.basename(path)
         with open(path, newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            for c in (reader.fieldnames or []):
-                if c not in seen_cols and c not in FLAG_COLS:
-                    seen_cols.add(c); all_cols.append(c)
-            for row in reader:
+            for row in csv.DictReader(f):
                 total_in += 1
                 cid = (row.get("Apollo Contact Id") or "").strip()
                 key = cid or norm_email(row.get("Email","")) or f"__norow_{total_in}"
@@ -121,9 +114,9 @@ def main():
     stage_vals = Counter(); email_status_vals = Counter()
  
     with open(master_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=all_cols + FLAG_COLS, extrasaction="ignore")
+        w = csv.DictWriter(f, fieldnames=KEEP_COLS + FLAG_COLS, extrasaction="ignore")
         w.writeheader()
-        for key, row in uniq:
+        for i, (key, row) in enumerate(uniq, start=1):
             fl = flags_for(row)
             for k, v in fl.items():
                 if v is True: counts[k] += 1
@@ -134,7 +127,8 @@ def main():
                     contactable_never_confirmed += 1
             stage_vals[(row.get("Stage") or "(empty)").strip()] += 1
             email_status_vals[(row.get("Email Status") or "(empty)").strip()] += 1
-            out = dict(row)
+            out = {c: row.get(c, "") for c in KEEP_COLS}
+            out["row_num"] = i
             out.update({k: ("TRUE" if v else "FALSE") if isinstance(v, bool) else v
                         for k, v in fl.items()})
             out["times_seen"]   = len(key_sources[key])
@@ -146,7 +140,7 @@ def main():
     print("  SAFETY LIST DEDUPE - SUMMARY")
     print("="*60)
     print(f"  Files processed............ {len(files)}")
-    print(f"  Original columns kept...... {len(all_cols)}  (+{len(FLAG_COLS)} flag cols)")
+    print(f"  Output columns (slim)...... {len(KEEP_COLS)+len(FLAG_COLS)}  (source files untouched)")
     print(f"  Total rows read (raw)...... {total_in:,}")
     print(f"  REAL UNIQUE PEOPLE......... {len(uniq):,}")
     dropped = total_in - len(uniq)
@@ -166,7 +160,6 @@ def main():
     print("-"*60)
     print(f"  >>> CONTACTABLE & NEVER WORKED......... {contactable_never:,}")
     print(f"      of which, on a CONFIRMED email..... {contactable_never_confirmed:,}")
-    print(f"      (remainder reachable via unconfirmed emails)")
     print("-"*60)
     print("  VERIFY (distinct values actually seen):")
     print("  STAGE:")
